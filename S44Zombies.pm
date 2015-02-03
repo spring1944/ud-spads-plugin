@@ -26,7 +26,9 @@ sub getParams { return [\%globalPluginParams,{}]; }
 my $host = "localhost:3000";
 
 sub eventLoop {
+    my $id = Mojo::IOLoop->timer(0.05 => sub {});
     Mojo::IOLoop->one_tick;
+    Mojo::IOLoop->remove($id);
 };
 
 my $ua = Mojo::UserAgent->new;
