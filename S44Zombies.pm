@@ -147,6 +147,31 @@ sub new ($class) {
     # in case it fails for some reason
     addSpringCommandHandler({SERVER_QUIT => sub { say "sending game end: $game_id"; game_end($game_id) }});
 
+    my $builtin_start = $::spadsHandlers{start};
+
+    addSpadsCommandHandler({start => sub ($source, $username, $params, $checkOnly) {
+        my $battle = getLobbyInterface()->getBattle();
+        my $users = $battle->{users};
+        my $bots = $battle->{bots};
+        my $merged = { $bots->%*, $users->%* };
+        my %players;
+        for my $name (keys $merged->%*) {
+            my $participant = $merged->{$name};
+            if ($participant->{battleStatus}->{mode} eq '1') {
+                $players{$name} = $participant;
+            }
+        }
+
+        $ua->post("$host/valid_teams" => json => \%players => sub ($ua, $tx) {
+            my $res = $tx->res->json;
+            if ($res->{ok}) {
+                $builtin_start->(@_);
+            } else {
+                sayBattle("NOT OK");
+            }
+        });
+    }}, 1);
+
     addSpadsCommandHandler({hq => sub ($source, $user, $params, $checkOnly) {
         $ua->get("$host/hq/$user" => sub ($ua, $tx) {
             sayPrivate($user, "server says: " . $tx->res->text);
