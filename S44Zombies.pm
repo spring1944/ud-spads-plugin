@@ -11,6 +11,10 @@ use experimental qw(signatures postderef);
 use JSON::MaybeXS;
 use Digest::xxHash qw(xxhash_hex);
 
+#see https://github.com/spring/spring/blob/HEAD/rts/Lua/LuaHandle.h#L22
+#these define "script_type" in the SpringAutohostInterface GAME_LUAMSG interface
+use constant LUARULES_MSG => 100;
+
 no warnings 'redefine';
 
 # TODO: queue API calls and only remove them from queue on confirm by
@@ -33,41 +37,60 @@ sub eventLoop {
 
 my $ua = Mojo::UserAgent->new;
 
-sub dispatch_message ($db, $game_id, $autohost, $message) {
-    if ($message =~ s/team-ready //) {
-        say "got a team ready message: $message";
-        my ($player_name, $team_id) = split '\|', $message;
-        $ua->get("$host/account/$player_name" => sub ($self, $tx) {
+my %zombies_command_handlers = (
+    'team-ready' => sub($game_id, $autohost, $data) {
+        say "got a team ready message: " . Dumper($data);
+        my ($player_name, $team_id) = $data->@{qw(name teamID)};
+        $ua->get("$host/$player_name" => sub ($self, $tx) {
             my $json = $tx->res->json;
             say "got a team-ready response for $player_name";
-            say Dumper($json);
             $json->{teamID} = $team_id;
-            $json->{money} //= 150000;
+            say "spawning a team!", Dumper($json);
             $autohost->sendChatMessage("/luarules spawn-team  " . encode_json($json));
         });
+    },
 
-    } elsif ($message =~ s/save-unit //) {
-        say "got a save-data message: $message";
+    'save-unit' => sub ($game_id, $autohost, $data) {
+        say "got a save-data message: " . Dumper($data);
         my $saved = 0;
-        my $data = decode_json($message);
         my $player_name = $data->{name};
-        $ua->post("$host/army/$player_name" => json => $data->{unit} => sub ($self, $tx) {
+        $ua->post("$host/$player_name/surviving_unit" => json => $data->{unit} => sub ($self, $tx) {
             $saved = 1;
         });
-
-    } elsif ($message =~ s/reward //) {
-        say "got a reward: $message";
+    },
+    reward => sub ($game_id, $autohost, $data) {
+        say "got a reward: " . Dumper($data);
         my $success = 0;
-        my $data = decode_json($message);
         my $player_name = $data->{name};
-        $ua->post("$host/bank/$player_name" => json => $data => sub ($self, $tx) {
+        $ua->post("$host/$player_name/bank" => json => $data => sub ($self, $tx) {
             $success = 1;
         });
+    }
+);
+
+sub dispatch_message ($game_id, $autohost, $raw_message) {
+    my $message;
+    # Try::Tiny would be nicer looking, but it uses subs, so  you can't return out of the
+    # catch block.
+    eval {
+        $message = decode_json($raw_message);
+        1;
+    } or do {
+        my $err = $@ || "blorg false-y error";
+        say "this message doesn't taste like JSON, or something: $err and $raw_message";
+        return;
+    };
+    my ($command, $data) = $message->@{qw(command data)};
+
+    if ($zombies_command_handlers{$command}) {
+        $zombies_command_handlers{$command}->($game_id, $autohost, $data);
+    } else {
+        say "no such command: $command~!";
     }
 }
 
 sub game_end ($game_id) {
-    $ua->post("$host/end/$game_id" => sub ($self, $tx) { });
+    $ua->post("$host/games/$game_id/end" => sub ($self, $tx) { });
 }
 
 sub new ($class) {
@@ -82,7 +105,6 @@ sub new ($class) {
 
     addSpringCommandHandler({SERVER_STARTPLAYING => sub {
         $game_id = $autohost->{gameId};
-        say Dumper($autohost);
         $seed = rand;
         %message_hash = ();
 
@@ -93,26 +115,32 @@ sub new ($class) {
         # hash at all.
         my @players = keys $autohost->{players}->%*;
         $num_players_running_sim = scalar @players;
-        $ua->post("$host/start/$game_id" => json => [@players] => sub ($self, $tx) { });
+        $ua->post("$host/games/$game_id/start" => json => [@players] => sub ($self, $tx) { });
     }});
 
     addSpringCommandHandler({PLAYER_JOINED => sub { $num_players_running_sim++ }});
     addSpringCommandHandler({PLAYER_LEFT => sub { $num_players_running_sim-- }});
 
-    addSpringCommandHandler({PLAYER_CHAT => sub ($message_type, $source_player, $dest_player, $chat_data) {
-        say "player $source_player sent '$chat_data' to player $dest_player";
-        my $fingerprint = xxhash_hex($chat_data, $seed);
-        $message_hash{$fingerprint} //= { seen => 0, sent => 0};
-        my $message = $message_hash{$fingerprint};
-        my $seen = ++$message->{seen};
-        my $sent = $message->{sent};
-        # this could probably also use a minimum of 2, but that would make my
-        # testing life difficult, and zombies isn't a 1v1 game.
-        say "message has fingerprint $fingerprint has been seen " . $seen . " times";
-        if ($seen >= $num_players_running_sim / 2 and not $sent) {
-            $message->{sent} = time;
-            dispatch_message($db, $game_id, $autohost, $chat_data);
-        } 
+    # TODO: assign some unique prefix or something to zombies messages. right
+    # now it relies on the fact that only messages sent by a majority of
+    # players are dispatched and decoded. script type being luarules msg does
+    # limit the confusion though
+    addSpringCommandHandler({GAME_LUAMSG => sub ($message_type, $source_player, $script_type, $mode, $data) {
+        if ($script_type eq LUARULES_MSG) {
+            say "player $source_player sent '$data' via script type $script_type using mode $mode";
+            my $fingerprint = xxhash_hex($data, $seed);
+            $message_hash{$fingerprint} //= { seen => 0, sent => 0};
+            my $message = $message_hash{$fingerprint};
+            my $seen = ++$message->{seen};
+            my $sent = $message->{sent};
+            # this could probably also use a minimum of 2, but that would make my
+            # testing life difficult, and zombies isn't a 1v1 game.
+            say "message has fingerprint $fingerprint has been seen " . $seen . " times";
+            if ($seen >= $num_players_running_sim / 2 and not $sent) {
+                $message->{sent} = time;
+                dispatch_message($game_id, $autohost, $data);
+            }
+        }
     }});
 
     addSpringCommandHandler({SERVER_GAMEOVER => sub { say "sending game end: $game_id"; game_end($game_id) }});
@@ -124,7 +152,7 @@ sub new ($class) {
             sayPrivate($user, "server says: " . $tx->res->text);
         });
     }});
-    
+
     return $self;
 }
 
