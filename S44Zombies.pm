@@ -27,10 +27,13 @@ my %globalPluginParams = ( commandsFile => ['notNull'],
                            helpFile => ['notNull'] );
 sub getParams { return [\%globalPluginParams,{}]; }
 
-my $host = "localhost:3000";
+# yes, I know. I'll add a config system soon. this is a prototype. please don't
+# give yourself a billion command and 100 Tiger IIs in the meantime.
+my $host = "http://localhost:3000";
+my $host_with_creds = "http://dog:cat\@localhost:3000";
 
 sub eventLoop {
-    my $id = Mojo::IOLoop->timer(0.05 => sub {});
+    my $id = Mojo::IOLoop->timer(0.01 => sub {});
     Mojo::IOLoop->one_tick;
     Mojo::IOLoop->remove($id);
 };
@@ -41,7 +44,7 @@ my %zombies_command_handlers = (
     'team-ready' => sub($game_id, $autohost, $data) {
         say "got a team ready message: " . Dumper($data);
         my ($player_name, $team_id) = $data->@{qw(name teamID)};
-        $ua->get("$host/$player_name" => sub ($self, $tx) {
+        $ua->get("$host_with_creds/$player_name" => sub ($self, $tx) {
             my $json = $tx->res->json;
             say "got a team-ready response for $player_name";
             $json->{teamID} = $team_id;
@@ -54,15 +57,25 @@ my %zombies_command_handlers = (
         say "got a save-data message: " . Dumper($data);
         my $saved = 0;
         my $player_name = $data->{name};
-        $ua->post("$host/$player_name/surviving_unit" => json => $data->{unit} => sub ($self, $tx) {
+        $ua->post("$host_with_creds/$player_name/surviving_unit" => json => $data->{unit} => sub ($self, $tx) {
             $saved = 1;
         });
     },
+
+    'remove-unit' => sub ($game_id, $autohost, $data) {
+        say "removing unit: " . Dumper($data);
+        my $removed = 0;
+        my $player_name = $data->{owner};
+        $ua->delete("$host_with_creds/$player_name/units/$data->{hq_id}" => sub ($self, $tx) {
+            $removed = 1;
+        });
+    },
+
     reward => sub ($game_id, $autohost, $data) {
         say "got a reward: " . Dumper($data);
         my $success = 0;
         my $player_name = $data->{name};
-        $ua->post("$host/$player_name/bank" => json => $data => sub ($self, $tx) {
+        $ua->post("$host_with_creds/$player_name/bank" => json => $data => sub ($self, $tx) {
             $success = 1;
         });
     }
@@ -90,7 +103,7 @@ sub dispatch_message ($game_id, $autohost, $raw_message) {
 }
 
 sub game_end ($game_id) {
-    $ua->post("$host/games/$game_id/end" => sub ($self, $tx) { });
+    $ua->post("$host_with_creds/games/$game_id/end" => sub ($self, $tx) { });
 }
 
 sub new ($class) {
@@ -115,7 +128,7 @@ sub new ($class) {
         # hash at all.
         my @players = keys $autohost->{players}->%*;
         $num_players_running_sim = scalar @players;
-        $ua->post("$host/games/$game_id/start" => json => [@players] => sub ($self, $tx) { });
+        $ua->post("$host_with_creds/games/$game_id/start" => json => [@players] => sub ($self, $tx) { });
     }});
 
     addSpringCommandHandler({PLAYER_JOINED => sub { $num_players_running_sim++ }});
@@ -149,7 +162,11 @@ sub new ($class) {
 
     my $builtin_start = $::spadsHandlers{start};
 
+    # the normal and correct way to hook !start is to use preSpadsCommand, but
+    # that depends on return values, which becomes tricky when making async
+    # calls.
     addSpadsCommandHandler({start => sub ($source, $username, $params, $checkOnly) {
+        sayBattle("checking to make sure everyone is ready to go...");
         my $battle = getLobbyInterface()->getBattle();
         my $users = $battle->{users};
         my $bots = $battle->{bots};
@@ -162,19 +179,26 @@ sub new ($class) {
             }
         }
 
-        $ua->post("$host/valid_teams" => json => \%players => sub ($ua, $tx) {
+        $ua->post("$host_with_creds/valid_teams" => json => \%players => sub ($ua, $tx) {
             my $res = $tx->res->json;
             if ($res->{ok}) {
                 $builtin_start->(@_);
             } else {
-                sayBattle("NOT OK");
+                sayBattle($res->{reason_for_not_starting} // "can't start yet, but the server didn't give a good reason. something broke!");
             }
         });
     }}, 1);
 
     addSpadsCommandHandler({hq => sub ($source, $user, $params, $checkOnly) {
-        $ua->get("$host/hq/$user" => sub ($ua, $tx) {
-            sayPrivate($user, "server says: " . $tx->res->text);
+        $ua->get("$host_with_creds/$user/token" => sub ($ua, $tx) {
+            if ($tx->res->json) {
+                my ($auth_user, $token) = $tx->res->json->@{qw(name token)};
+                say Dumper($auth_user, $token);
+                my $link = "http://localhost:3000/login/$auth_user/$token";
+                sayPrivate($user, $link);
+            } else {
+                say "blorg error";
+            }
         });
     }});
 
