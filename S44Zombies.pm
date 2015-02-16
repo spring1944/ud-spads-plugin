@@ -194,7 +194,7 @@ sub new ($class) {
             if ($tx->res->json) {
                 my ($auth_user, $token) = $tx->res->json->@{qw(name token)};
                 say Dumper($auth_user, $token);
-                my $link = "http://localhost:3000/login/$auth_user/$token";
+                my $link = "$host/login/$auth_user/$token";
                 sayPrivate($user, $link);
             } else {
                 say "blorg error";
