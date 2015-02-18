@@ -140,7 +140,6 @@ sub new ($class) {
     # limit the confusion though
     addSpringCommandHandler({GAME_LUAMSG => sub ($message_type, $source_player, $script_type, $mode, $data) {
         if ($script_type eq LUARULES_MSG) {
-            say "player $source_player sent '$data' via script type $script_type using mode $mode";
             my $fingerprint = xxhash_hex($data, $seed);
             $message_hash{$fingerprint} //= { seen => 0, sent => 0};
             my $message = $message_hash{$fingerprint};
@@ -148,7 +147,6 @@ sub new ($class) {
             my $sent = $message->{sent};
             # this could probably also use a minimum of 2, but that would make my
             # testing life difficult, and zombies isn't a 1v1 game.
-            say "message has fingerprint $fingerprint has been seen " . $seen . " times";
             if ($seen >= $num_players_running_sim / 2 and not $sent) {
                 $message->{sent} = time;
                 dispatch_message($game_id, $autohost, $data);
@@ -161,11 +159,10 @@ sub new ($class) {
     addSpringCommandHandler({SERVER_QUIT => sub { say "sending game end: $game_id"; game_end($game_id) }});
 
     my $builtin_start = $::spadsHandlers{start};
+    my $builtin_forcestart = $::spadsHandlers{forcestart};
 
-    # the normal and correct way to hook !start is to use preSpadsCommand, but
-    # that depends on return values, which becomes tricky when making async
-    # calls.
-    addSpadsCommandHandler({start => sub ($source, $username, $params, $checkOnly) {
+    my $validate_players = sub {
+        my $force = shift;
         sayBattle("checking to make sure everyone is ready to go...");
         my $battle = getLobbyInterface()->getBattle();
         my $users = $battle->{users};
@@ -182,12 +179,22 @@ sub new ($class) {
         $ua->post("$host_with_creds/valid_teams" => json => \%players => sub ($ua, $tx) {
             my $res = $tx->res->json;
             if ($res->{ok}) {
-                $builtin_start->(@_);
+                if ($force) {
+                    $builtin_forcestart->(@_);
+                } else {
+                    $builtin_start->(@_);
+                }
             } else {
                 sayBattle($res->{reason_for_not_starting} // "can't start yet, but the server didn't give a good reason. something broke!");
             }
         });
-    }}, 1);
+    };
+
+    # the normal and correct way to hook !start is to use preSpadsCommand, but
+    # that depends on return values, which becomes tricky when making async
+    # calls.
+    addSpadsCommandHandler({start => sub { $validate_players->('', @_) }}, 1);
+    addSpadsCommandHandler({forcestart => sub { $validate_players->(1, @_) }}, 1);
 
     addSpadsCommandHandler({hq => sub ($source, $user, $params, $checkOnly) {
         $ua->get("$host_with_creds/$user/token" => sub ($ua, $tx) {
