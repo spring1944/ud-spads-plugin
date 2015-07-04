@@ -5,6 +5,8 @@ use SpadsPluginApi;
 use Data::Dumper qw(Dumper);
 use Mojo::IOLoop;
 use Mojo::UserAgent;
+use EV;
+use AnyEvent;
 use 5.20.1;
 
 use experimental qw(signatures postderef);
@@ -31,12 +33,6 @@ sub getParams { return [\%globalPluginParams,{}]; }
 # give yourself a billion command and 100 Tiger IIs in the meantime.
 my $host = "http://localhost:3000";
 my $host_with_creds = "http://dog:cat\@localhost:3000";
-
-sub eventLoop {
-    my $id = Mojo::IOLoop->timer(0.01 => sub {});
-    Mojo::IOLoop->one_tick;
-    Mojo::IOLoop->remove($id);
-};
 
 my $ua = Mojo::UserAgent->new;
 
